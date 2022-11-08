@@ -19,6 +19,7 @@ type dnsProxy struct {
 	httpUrl  url.URL
 	records  map[string][]net.IP
 	localTTL int
+	verbose  bool
 }
 
 func parseHostsFile(path string) (map[string][]net.IP, error) {
@@ -68,7 +69,9 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 		case dns.TypeAAAA:
 			queryType := dns.TypeToString[q.Qtype]
 
-			log.Printf("%s query for %s\n", queryType, q.Name)
+			if p.verbose {
+				log.Printf("%s query for %s\n", queryType, q.Name)
+			}
 
 			ips := p.records[q.Name]
 			for _, ip := range ips {
@@ -98,13 +101,17 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 			}
 			break
 		default:
-			log.Printf("Unsupported query type %s for %s\n", dns.TypeToString[q.Qtype], q.Name)
+			if p.verbose {
+				log.Printf("Unsupported query type %s for %s\n", dns.TypeToString[q.Qtype], q.Name)
+			}
 		}
 	}
-	if foundEntries {
-		log.Printf(" -> locally handled (%d records)\n", len(m.Answer))
-	} else {
-		log.Printf(" -> forwarding to upstream\n")
+	if p.verbose {
+		if foundEntries {
+			log.Printf(" -> locally handled (%d records)\n", len(m.Answer))
+		} else {
+			log.Printf(" -> forwarding to upstream\n")
+		}
 	}
 	return foundEntries
 }
@@ -214,6 +221,7 @@ type config struct {
 	BindTo      string   `cli:"b,bind" usage:"Address to bind to (default: 0.0.0.0:53)" dft:"0.0.0.0:53"`
 	HostsTTL    int      `cli:"t,ttl" usage:"TTL for hosts file entries (default: 10)" dft:"10"`
 	HostsFiles  []string `cli:"H,hosts" usage:"Path to hosts file"`
+	Verbose     bool     `cli:"V,verbose" usage:"Verbose output"`
 }
 
 func (argv *config) AutoHelp() bool {
@@ -238,6 +246,7 @@ func main() {
 		httpUrl:  *u,
 		records:  make(map[string][]net.IP),
 		localTTL: cfg.HostsTTL,
+		verbose:  cfg.Verbose,
 	}
 
 	count := 0
