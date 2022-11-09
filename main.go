@@ -225,11 +225,13 @@ func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 			resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
 			if err != nil {
 				log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
+				m.SetRcode(r, dns.RcodeServerFailure)
 				goto localReply
 			}
 
 			err = w.WriteMsg(resp)
 			if err != nil {
+				m.SetRcode(r, dns.RcodeServerFailure)
 				log.Printf("Failed to write response: %s\n", err.Error())
 			}
 			return
