@@ -136,7 +136,7 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 func exchangeHTTPSClient(
 	url url.URL,
 	client *http.Client,
-	forwardedFor net.Addr,
+	forwardedFor net.IP,
 	req *dns.Msg,
 ) (resp *dns.Msg, err error) {
 	buf, err := req.Pack()
@@ -158,7 +158,9 @@ func exchangeHTTPSClient(
 
 	httpReq.Header.Set("Accept", "application/dns-message")
 	httpReq.Header.Set("User-Agent", "")
+	httpReq.Header.Set("X-Forwarded-Proto", "https") // not really but lol
 	httpReq.Header.Set("X-Forwarded-For", forwardedFor.String())
+	httpReq.Header.Set("X-Real-IP", forwardedFor.String())
 
 	httpResp, err := client.Do(httpReq)
 	if err != nil {
@@ -209,7 +211,18 @@ func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		if !p.addLocalResponses(m) {
 			httpClient := &http.Client{}
 
-			resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, w.RemoteAddr(), r)
+			var forwardedForAddr net.Addr = w.RemoteAddr()
+			var forwardedFor net.IP
+			switch addr := forwardedForAddr.(type) {
+			case *net.UDPAddr:
+				forwardedFor = addr.IP
+			case *net.TCPAddr:
+				forwardedFor = addr.IP
+			default:
+				log.Fatalf("Unsupported remote address type: %T", addr)
+			}
+
+			resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
 			if err != nil {
 				log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
 				goto localReply
