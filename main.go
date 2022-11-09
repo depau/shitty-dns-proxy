@@ -86,6 +86,7 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 					}
 				} else {
 					if ip.To4() == nil {
+						foundEntries = true
 						continue
 					}
 					ipStr = ip.To4().String()
