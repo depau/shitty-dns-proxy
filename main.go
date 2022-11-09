@@ -16,10 +16,11 @@ import (
 )
 
 type dnsProxy struct {
-	httpUrl  url.URL
-	records  map[string][]net.IP
-	localTTL int
-	verbose  bool
+	httpUrl    url.URL
+	records    map[string][]net.IP
+	ptrRecords map[string]string
+	localTTL   int
+	verbose    bool
 }
 
 func parseHostsFile(path string) (map[string][]net.IP, error) {
@@ -101,6 +102,21 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 				foundEntries = true
 			}
 			break
+		case dns.TypePTR:
+			if p.verbose {
+				log.Printf("PTR query for %s\n", q.Name)
+			}
+			ptr, ok := p.ptrRecords[q.Name]
+			if !ok {
+				continue
+			}
+			rr, err := dns.NewRR(fmt.Sprintf("%s %d PTR %s", q.Name, p.localTTL, ptr))
+			if err != nil {
+				log.Printf("Failed to create RR: %s\n", err.Error())
+				continue
+			}
+			m.Answer = append(m.Answer, rr)
+			foundEntries = true
 		default:
 			if p.verbose {
 				log.Printf("Unsupported query type %s for %s\n", dns.TypeToString[q.Qtype], q.Name)
@@ -216,6 +232,31 @@ localReply:
 	}
 }
 
+// from net.dnsclient
+func reverseaddr(ip net.IP) (arpa string) {
+	const hexDigit = "0123456789abcdef"
+
+	if ip == nil {
+		return ""
+	}
+	if ip.To4() != nil {
+		return fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa.", ip[15], ip[14], ip[13], ip[12])
+	}
+	// Must be IPv6
+	buf := make([]byte, 0, len(ip)*4+len("ip6.arpa."))
+	//Add it, in reverse, to the buffer
+	for i := len(ip) - 1; i >= 0; i-- {
+		v := ip[i]
+		buf = append(buf, hexDigit[v&0xF],
+			'.',
+			hexDigit[v>>4],
+			'.')
+	}
+	//Append "ip6.arpa." and return (buf already has the final .)
+	buf = append(buf, "ip6.arpa."...)
+	return string(buf)
+}
+
 type config struct {
 	Help        bool     `cli:"!h,help" usage:"Show this screen."`
 	UpstreamUrl string   `cli:"u,upstream" usage:"Upstream URL to forward queries to (for instance https://cloudflare-dns.com/dns-query)"`
@@ -244,10 +285,11 @@ func main() {
 	}
 
 	proxy := &dnsProxy{
-		httpUrl:  *u,
-		records:  make(map[string][]net.IP),
-		localTTL: cfg.HostsTTL,
-		verbose:  cfg.Verbose,
+		httpUrl:    *u,
+		records:    make(map[string][]net.IP),
+		ptrRecords: make(map[string]string),
+		localTTL:   cfg.HostsTTL,
+		verbose:    cfg.Verbose,
 	}
 
 	count := 0
@@ -261,6 +303,14 @@ func main() {
 			count += len(v)
 		}
 	}
+
+	for name, ips := range proxy.records {
+		for _, ip := range ips {
+			reversed := reverseaddr(ip)
+			proxy.ptrRecords[reversed] = name
+		}
+	}
+
 	if len(cfg.HostsFiles) > 0 {
 		log.Printf("Loaded %d records from %d hosts files", count, len(cfg.HostsFiles))
 	}
