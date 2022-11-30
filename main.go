@@ -23,16 +23,9 @@ type dnsProxy struct {
 	verbose    bool
 }
 
-func parseHostsFile(path string) (map[string][]net.IP, error) {
+func parseHostsScanner(scanner *bufio.Scanner) (map[string][]net.IP, error) {
 	records := make(map[string][]net.IP)
 
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -64,6 +57,17 @@ func parseHostsFile(path string) (map[string][]net.IP, error) {
 	}
 
 	return records, nil
+}
+
+func parseHostsFile(path string) (map[string][]net.IP, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	return parseHostsScanner(scanner)
 }
 
 func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
