@@ -39,6 +39,11 @@ func parseHostsFile(path string) (map[string][]net.IP, error) {
 			continue
 		}
 
+		commentIndex := strings.Index(line, "#")
+		if commentIndex != -1 {
+			line = line[:commentIndex]
+		}
+
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
 			continue
