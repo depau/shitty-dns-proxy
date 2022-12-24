@@ -214,36 +214,41 @@ func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = false
+	m.RecursionAvailable = true
 
 	switch r.Opcode {
 	case dns.OpcodeQuery:
 		if !p.addLocalResponses(m) {
-			httpClient := &http.Client{}
+			if r.RecursionDesired {
+				httpClient := &http.Client{}
 
-			var forwardedForAddr net.Addr = w.RemoteAddr()
-			var forwardedFor net.IP
-			switch addr := forwardedForAddr.(type) {
-			case *net.UDPAddr:
-				forwardedFor = addr.IP
-			case *net.TCPAddr:
-				forwardedFor = addr.IP
-			default:
-				log.Fatalf("Unsupported remote address type: %T", addr)
-			}
+				var forwardedForAddr net.Addr = w.RemoteAddr()
+				var forwardedFor net.IP
+				switch addr := forwardedForAddr.(type) {
+				case *net.UDPAddr:
+					forwardedFor = addr.IP
+				case *net.TCPAddr:
+					forwardedFor = addr.IP
+				default:
+					log.Fatalf("Unsupported remote address type: %T", addr)
+				}
 
-			resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
-			if err != nil {
-				log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
-				m.SetRcode(r, dns.RcodeServerFailure)
-				goto localReply
-			}
+				resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
+				if err != nil {
+					log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
+					m.SetRcode(r, dns.RcodeServerFailure)
+					goto localReply
+				}
 
-			err = w.WriteMsg(resp)
-			if err != nil {
-				m.SetRcode(r, dns.RcodeServerFailure)
-				log.Printf("Failed to write response: %s\n", err.Error())
+				err = w.WriteMsg(resp)
+				if err != nil {
+					m.SetRcode(r, dns.RcodeServerFailure)
+					log.Printf("Failed to write response: %s\n", err.Error())
+				}
+				return
+			} else {
+				m.SetRcode(r, dns.RcodeNameError)
 			}
-			return
 		} else {
 			m.SetRcode(r, dns.RcodeSuccess)
 		}
