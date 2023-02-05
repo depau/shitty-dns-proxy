@@ -336,7 +336,9 @@ func main() {
 	for name, ips := range proxy.records {
 		for _, ip := range ips {
 			reversed := reverseaddr(ip)
-			proxy.ptrRecords[reversed] = name
+			if _, ok := proxy.ptrRecords[reversed]; !ok {
+				proxy.ptrRecords[reversed] = name
+			}
 		}
 	}
 
