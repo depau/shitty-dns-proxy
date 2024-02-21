@@ -376,13 +376,13 @@ func reverseaddr(ip net.IP) (arpa string) {
 }
 
 type config struct {
-	Help            bool          `cli:"!h,help" usage:"Show this screen."`
-	UpstreamUrl     string        `cli:"u,upstream" usage:"Upstream URL to forward queries to (for instance https://cloudflare-dns.com/dns-query)"`
-	BindTo          string        `cli:"b,bind" usage:"Address to bind to (default: 0.0.0.0:53)" dft:"0.0.0.0:53"`
-	HostsTTL        int           `cli:"t,ttl" usage:"TTL for hosts file entries (default: 10)" dft:"10"`
-	HostsFiles      []string      `cli:"H,hosts" usage:"Path to hosts file"`
-	UpstreamTimeout time.Duration `cli:"T,timeout" usage:"Timeout for upstream requests (default: 5s)" dft:"5s"`
-	Verbose         bool          `cli:"V,verbose" usage:"Verbose output"`
+	Help            bool     `cli:"!h,help" usage:"Show this screen."`
+	UpstreamUrl     string   `cli:"u,upstream" usage:"Upstream URL to forward queries to (for instance https://cloudflare-dns.com/dns-query)"`
+	BindTo          string   `cli:"b,bind" usage:"Address to bind to (default: 0.0.0.0:53)" dft:"0.0.0.0:53"`
+	HostsTTL        int      `cli:"t,ttl" usage:"TTL for hosts file entries (default: 10)" dft:"10"`
+	HostsFiles      []string `cli:"H,hosts" usage:"Path to hosts file"`
+	UpstreamTimeout int      `cli:"T,timeout" usage:"Timeout for upstream requests (default: 5)" dft:"5"`
+	Verbose         bool     `cli:"V,verbose" usage:"Verbose output"`
 }
 
 func (argv *config) AutoHelp() bool {
@@ -410,7 +410,7 @@ func main() {
 		cnameCache:      make(map[uint16]map[string]cacheEntry),
 		localTTL:        cfg.HostsTTL,
 		verbose:         cfg.Verbose,
-		upstreamTimeout: cfg.UpstreamTimeout,
+		upstreamTimeout: time.Duration(cfg.UpstreamTimeout) * time.Second,
 	}
 
 	proxy.cnameCache[dns.TypeA] = make(map[string]cacheEntry)
