@@ -13,18 +13,44 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"time"
 )
 
-type dnsProxy struct {
-	httpUrl    url.URL
-	records    map[string][]net.IP
-	ptrRecords map[string]string
-	localTTL   int
-	verbose    bool
+type HostInfo struct {
+	IP    net.IP
+	CName string
 }
 
-func parseHostsScanner(scanner *bufio.Scanner) (map[string][]net.IP, error) {
-	records := make(map[string][]net.IP)
+type Host interface {
+	IsIP() bool
+	IsCName() bool
+}
+
+func (h HostInfo) IsIP() bool {
+	return h.IP != nil
+}
+
+func (h HostInfo) IsCName() bool {
+	return h.CName != ""
+}
+
+type cacheEntry struct {
+	rrs  []dns.RR
+	time time.Time
+}
+
+type dnsProxy struct {
+	httpUrl         url.URL
+	records         map[string][]HostInfo
+	ptrRecords      map[string]string
+	cnameCache      map[uint16]map[string]cacheEntry
+	localTTL        int
+	verbose         bool
+	upstreamTimeout time.Duration
+}
+
+func parseHostsScanner(scanner *bufio.Scanner) (map[string][]HostInfo, error) {
+	records := make(map[string][]HostInfo)
 
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -42,24 +68,32 @@ func parseHostsScanner(scanner *bufio.Scanner) (map[string][]net.IP, error) {
 			continue
 		}
 
-		ip := net.ParseIP(fields[0])
-		if ip == nil {
-			continue
+		destField := fields[0]
+		hostInfo := HostInfo{}
+
+		if strings.HasPrefix(destField, "@") {
+			hostInfo.CName = destField[1:] + "."
+		} else {
+			ip := net.ParseIP(destField)
+			if ip == nil {
+				continue
+			}
+			hostInfo.IP = ip
 		}
 
 		for _, host := range fields[1:] {
 			dnsName := fmt.Sprintf("%s.", host)
 			if _, ok := records[dnsName]; !ok {
-				records[dnsName] = make([]net.IP, 0)
+				records[dnsName] = make([]HostInfo, 0)
 			}
-			records[dnsName] = append(records[dnsName], ip)
+			records[dnsName] = append(records[dnsName], hostInfo)
 		}
 	}
 
 	return records, nil
 }
 
-func parseHostsFile(path string) (map[string][]net.IP, error) {
+func parseHostsFile(path string) (map[string][]HostInfo, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -70,7 +104,33 @@ func parseHostsFile(path string) (map[string][]net.IP, error) {
 	return parseHostsScanner(scanner)
 }
 
-func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
+func (p *dnsProxy) queryCName(cname string, recordType uint16, onBehalfOf net.Addr) ([]dns.RR, error) {
+	cache, ok := p.cnameCache[recordType]
+	if !ok {
+		return nil, fmt.Errorf("unsupported record type %d", recordType)
+	}
+	cached, ok := cache[cname]
+	if ok && time.Since(cached.time) < time.Duration(p.localTTL)*time.Second {
+		return cached.rrs, nil
+	}
+
+	// Request the domain's A and AAAA records from the upstream server.
+	req := new(dns.Msg)
+	req.SetQuestion(cname, recordType)
+	req.RecursionDesired = true
+
+	resp, err := p.respondToRequest(req, onBehalfOf)
+	if err != nil {
+		return nil, err
+	}
+
+	rrs := resp.Answer
+
+	p.cnameCache[recordType][cname] = cacheEntry{rrs, time.Now()}
+	return rrs, nil
+}
+
+func (p *dnsProxy) addLocalResponses(m *dns.Msg, onBehalfOf net.Addr) bool {
 	foundEntries := false
 	for _, q := range m.Question {
 		switch q.Qtype {
@@ -83,32 +143,55 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg) bool {
 				log.Printf("%s query for %s\n", queryType, q.Name)
 			}
 
-			ips := p.records[q.Name]
-			for _, ip := range ips {
+			records := p.records[q.Name]
+			for _, record := range records {
 				var ipStr string
-				if q.Qtype == dns.TypeAAAA {
-					if ip.To4() != nil {
-						// Skip IPv4 addresses for AAAA queries, but prevent from asking upstream.
-						foundEntries = true
-						continue
-					} else {
-						ipStr = ip.String()
-					}
-				} else {
-					if ip.To4() == nil {
-						foundEntries = true
-						continue
-					}
-					ipStr = ip.To4().String()
-				}
 
-				rr, err := dns.NewRR(fmt.Sprintf("%s %d %s %s", q.Name, p.localTTL, queryType, ipStr))
-				if err != nil {
-					log.Printf("Failed to create RR: %s\n", err.Error())
+				if record.IsIP() {
+					ip := record.IP
+					if q.Qtype == dns.TypeAAAA {
+						if ip.To4() != nil {
+							// Skip IPv4 addresses for AAAA queries, but prevent from asking upstream.
+							foundEntries = true
+							continue
+						} else {
+							ipStr = ip.String()
+						}
+					} else {
+						if ip.To4() == nil {
+							foundEntries = true
+							continue
+						}
+						ipStr = ip.To4().String()
+					}
+
+					rr, err := dns.NewRR(fmt.Sprintf("%s %d %s %s", q.Name, p.localTTL, queryType, ipStr))
+					if err != nil {
+						log.Printf("Failed to create RR: %s\n", err.Error())
+						continue
+					}
+					m.Answer = append(m.Answer, rr)
+					foundEntries = true
+
+				} else {
+					if p.verbose {
+						log.Printf(" -> querying CNAME %s\n", record.CName)
+					}
+					rrs, err := p.queryCName(record.CName, q.Qtype, onBehalfOf)
+					if err != nil {
+						log.Printf("Failed to query %s: %s\n", record.CName, err.Error())
+						continue
+					}
+					m.Answer = append(m.Answer, rrs...)
+
+					// Fixup the cname of the records.
+					for _, rr := range m.Answer {
+						rr.Header().Name = q.Name
+					}
+
+					foundEntries = true
 					continue
 				}
-				m.Answer = append(m.Answer, rr)
-				foundEntries = true
 			}
 			break
 		case dns.TypePTR:
@@ -210,7 +293,19 @@ func exchangeHTTPSClient(
 	return resp, err
 }
 
-func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
+func getForwardedFor(addr net.Addr) net.IP {
+	switch addr := addr.(type) {
+	case *net.UDPAddr:
+		return addr.IP
+	case *net.TCPAddr:
+		return addr.IP
+	default:
+		log.Fatalf("Unsupported remote address type: %T", addr)
+	}
+	return nil
+}
+
+func (p *dnsProxy) respondToRequest(r *dns.Msg, onBehalfOf net.Addr) (resp *dns.Msg, err error) {
 	m := new(dns.Msg)
 	m.SetReply(r)
 	m.Compress = false
@@ -218,34 +313,14 @@ func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 
 	switch r.Opcode {
 	case dns.OpcodeQuery:
-		if !p.addLocalResponses(m) {
+		if !p.addLocalResponses(m, onBehalfOf) {
 			if r.RecursionDesired {
-				httpClient := &http.Client{}
-
-				var forwardedForAddr net.Addr = w.RemoteAddr()
-				var forwardedFor net.IP
-				switch addr := forwardedForAddr.(type) {
-				case *net.UDPAddr:
-					forwardedFor = addr.IP
-				case *net.TCPAddr:
-					forwardedFor = addr.IP
-				default:
-					log.Fatalf("Unsupported remote address type: %T", addr)
+				httpClient := &http.Client{
+					Timeout: p.upstreamTimeout,
 				}
 
-				resp, err := exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
-				if err != nil {
-					log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
-					m.SetRcode(r, dns.RcodeServerFailure)
-					goto localReply
-				}
-
-				err = w.WriteMsg(resp)
-				if err != nil {
-					m.SetRcode(r, dns.RcodeServerFailure)
-					log.Printf("Failed to write response: %s\n", err.Error())
-				}
-				return
+				forwardedFor := getForwardedFor(onBehalfOf)
+				return exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
 			} else {
 				m.SetRcode(r, dns.RcodeNameError)
 			}
@@ -254,8 +329,22 @@ func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
 		}
 	}
 
-localReply:
-	err := w.WriteMsg(m)
+	return m, nil
+}
+
+func (p *dnsProxy) handleDnsRequest(w dns.ResponseWriter, r *dns.Msg) {
+	resp, err := p.respondToRequest(r, w.RemoteAddr())
+
+	if err != nil {
+		log.Printf("Failed to query %s: %s\n", r.Question[0].Name, err.Error())
+		resp = new(dns.Msg)
+		resp.SetReply(r)
+		resp.Compress = false
+		resp.RecursionAvailable = true
+		resp.SetRcode(r, dns.RcodeServerFailure)
+	}
+
+	err = w.WriteMsg(resp)
 	if err != nil {
 		log.Printf("Failed to write response: %s\n", err.Error())
 	}
@@ -287,12 +376,13 @@ func reverseaddr(ip net.IP) (arpa string) {
 }
 
 type config struct {
-	Help        bool     `cli:"!h,help" usage:"Show this screen."`
-	UpstreamUrl string   `cli:"u,upstream" usage:"Upstream URL to forward queries to (for instance https://cloudflare-dns.com/dns-query)"`
-	BindTo      string   `cli:"b,bind" usage:"Address to bind to (default: 0.0.0.0:53)" dft:"0.0.0.0:53"`
-	HostsTTL    int      `cli:"t,ttl" usage:"TTL for hosts file entries (default: 10)" dft:"10"`
-	HostsFiles  []string `cli:"H,hosts" usage:"Path to hosts file"`
-	Verbose     bool     `cli:"V,verbose" usage:"Verbose output"`
+	Help            bool          `cli:"!h,help" usage:"Show this screen."`
+	UpstreamUrl     string        `cli:"u,upstream" usage:"Upstream URL to forward queries to (for instance https://cloudflare-dns.com/dns-query)"`
+	BindTo          string        `cli:"b,bind" usage:"Address to bind to (default: 0.0.0.0:53)" dft:"0.0.0.0:53"`
+	HostsTTL        int           `cli:"t,ttl" usage:"TTL for hosts file entries (default: 10)" dft:"10"`
+	HostsFiles      []string      `cli:"H,hosts" usage:"Path to hosts file"`
+	UpstreamTimeout time.Duration `cli:"T,timeout" usage:"Timeout for upstream requests (default: 5s)" dft:"5s"`
+	Verbose         bool          `cli:"V,verbose" usage:"Verbose output"`
 }
 
 func (argv *config) AutoHelp() bool {
@@ -314,12 +404,17 @@ func main() {
 	}
 
 	proxy := &dnsProxy{
-		httpUrl:    *u,
-		records:    make(map[string][]net.IP),
-		ptrRecords: make(map[string]string),
-		localTTL:   cfg.HostsTTL,
-		verbose:    cfg.Verbose,
+		httpUrl:         *u,
+		records:         make(map[string][]HostInfo),
+		ptrRecords:      make(map[string]string),
+		cnameCache:      make(map[uint16]map[string]cacheEntry),
+		localTTL:        cfg.HostsTTL,
+		verbose:         cfg.Verbose,
+		upstreamTimeout: cfg.UpstreamTimeout,
 	}
+
+	proxy.cnameCache[dns.TypeA] = make(map[string]cacheEntry)
+	proxy.cnameCache[dns.TypeAAAA] = make(map[string]cacheEntry)
 
 	count := 0
 	for _, hostsFile := range cfg.HostsFiles {
@@ -335,7 +430,11 @@ func main() {
 
 	for name, ips := range proxy.records {
 		for _, ip := range ips {
-			reversed := reverseaddr(ip)
+			if ip.IsCName() {
+				continue
+			}
+
+			reversed := reverseaddr(ip.IP)
 			if _, ok := proxy.ptrRecords[reversed]; !ok {
 				proxy.ptrRecords[reversed] = name
 			}

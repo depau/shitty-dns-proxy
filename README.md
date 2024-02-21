@@ -18,6 +18,23 @@ the request to Adguard Home and be able to see which client made the request.
 
 It also replies to requests to hosts found in specified `/etc/hosts`-like files.
 
+### Hosts file format
+
+The hosts file format is the same as the one used by `/etc/hosts`, with some extra features:
+
+- Comments are allowed, and they start with a `#` character.
+- All whitespace is ignored.
+- You can define CNAME-like entries by using a domain name as the target of an entry, prefixed by a `@` character.
+
+Example:
+
+```
+# This is a comment
+123.45.67.89    example.com       # This is also a comment
+@example.com    example.org       # This also resolves to 123.45.67.89
+@google.com     google-alias.com  # This resolves to whatever google.com resolves to
+```
+
 ## License
 
 "Just do whatever you want with it, I didn't want to write this in the first place", MIT license.
