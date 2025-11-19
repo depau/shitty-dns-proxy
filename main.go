@@ -2,11 +2,7 @@ package main
 
 import (
 	"bufio"
-	"encoding/base64"
 	"fmt"
-	"github.com/miekg/dns"
-	"github.com/mkideal/cli"
-	"io"
 	"log"
 	"net"
 	"net/http"
@@ -14,6 +10,9 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"github.com/miekg/dns"
+	"github.com/mkideal/cli"
 )
 
 type HostInfo struct {
@@ -40,7 +39,7 @@ type cacheEntry struct {
 }
 
 type dnsProxy struct {
-	httpUrl         url.URL
+	upstream        Upstream
 	records         map[string][]HostInfo
 	ptrRecords      map[string]string
 	cnameCache      map[uint16]map[string]cacheEntry
@@ -225,72 +224,27 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg, onBehalfOf net.Addr) bool {
 	return foundEntries
 }
 
-func exchangeHTTPSClient(
-	url url.URL,
-	client *http.Client,
-	forwardedFor net.IP,
-	req *dns.Msg,
-) (resp *dns.Msg, err error) {
-	buf, err := req.Pack()
+func NewUpstream(upstreamUrl string, timeout time.Duration) (Upstream, error) {
+	u, err := url.Parse(upstreamUrl)
 	if err != nil {
-		return nil, fmt.Errorf("packing message: %w", err)
+		return nil, err
 	}
 
-	// It appears, that GET requests are more memory-efficient with Golang
-	// implementation of HTTP/2.
-	method := http.MethodGet
-
-	u := url
-	u.RawQuery = fmt.Sprintf("dns=%s", base64.RawURLEncoding.EncodeToString(buf))
-
-	httpReq, err := http.NewRequest(method, u.String(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating http request to %s: %w", url.String(), err)
+	switch u.Scheme {
+	case "https", "http":
+		return &HttpUpstream{
+			url: *u,
+			client: &http.Client{
+				Timeout: timeout,
+			},
+		}, nil
+	case "dns":
+		return &UdpUpstream{
+			addr: u.Host,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported upstream scheme: %s", u.Scheme)
 	}
-
-	httpReq.Header.Set("Accept", "application/dns-message")
-	httpReq.Header.Set("User-Agent", "")
-	httpReq.Header.Set("X-Forwarded-Proto", "https") // not really but lol
-	httpReq.Header.Set("X-Forwarded-For", forwardedFor.String())
-	httpReq.Header.Set("X-Real-IP", forwardedFor.String())
-
-	httpResp, err := client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("requesting %s: %w", u.String(), err)
-	}
-	defer httpResp.Body.Close()
-
-	body, err := io.ReadAll(httpResp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading %s: %w", u.String(), err)
-	}
-
-	if httpResp.StatusCode != http.StatusOK {
-		return nil,
-			fmt.Errorf(
-				"expected status %d, got %d from %s",
-				http.StatusOK,
-				httpResp.StatusCode,
-				u.String(),
-			)
-	}
-
-	resp = &dns.Msg{}
-	err = resp.Unpack(body)
-	if err != nil {
-		return nil, fmt.Errorf(
-			"unpacking response from %s: body is %s: %w",
-			u.String(),
-			body,
-			err,
-		)
-	}
-
-	if resp.Id != req.Id {
-		err = dns.ErrId
-	}
-
-	return resp, err
 }
 
 func getForwardedFor(addr net.Addr) net.IP {
@@ -315,12 +269,8 @@ func (p *dnsProxy) respondToRequest(r *dns.Msg, onBehalfOf net.Addr) (resp *dns.
 	case dns.OpcodeQuery:
 		if !p.addLocalResponses(m, onBehalfOf) {
 			if r.RecursionDesired {
-				httpClient := &http.Client{
-					Timeout: p.upstreamTimeout,
-				}
-
 				forwardedFor := getForwardedFor(onBehalfOf)
-				return exchangeHTTPSClient(p.httpUrl, httpClient, forwardedFor, r)
+				return p.upstream.Exchange(r, forwardedFor)
 			} else {
 				m.SetRcode(r, dns.RcodeNameError)
 			}
@@ -398,13 +348,13 @@ func main() {
 		return
 	}
 
-	u, err := url.Parse(cfg.UpstreamUrl)
+	upstream, err := NewUpstream(cfg.UpstreamUrl, time.Duration(cfg.UpstreamTimeout)*time.Second)
 	if err != nil {
 		log.Fatal(err)
 	}
 
 	proxy := &dnsProxy{
-		httpUrl:         *u,
+		upstream:        upstream,
 		records:         make(map[string][]HostInfo),
 		ptrRecords:      make(map[string]string),
 		cnameCache:      make(map[uint16]map[string]cacheEntry),
