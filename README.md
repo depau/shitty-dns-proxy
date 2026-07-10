@@ -11,12 +11,28 @@ Use `DOCKER_BUILDKIT=1 docker build .` to build the image, or `docker-compose` w
 
 ## What it does
 
-It listens for plain old DNS requests and it forwards them to a DNS-over-HTTP(S) server of your choice.
+It listens for plain old DNS requests (UDP) and forwards them to an upstream of your choice. The upstream can be either:
 
-It sets the `X-Forwarded-For` header to the IP address of the client that sent the request. This is useful to forward
-the request to Adguard Home and be able to see which client made the request.
+- a DNS-over-HTTP(S) server (`https://` or `http://` URL), or
+- a plain DNS server over UDP (`dns://host:port`).
 
-It also replies to requests to hosts found in specified `/etc/hosts`-like files.
+For DoH upstreams it sets the `X-Forwarded-For` and `X-Real-IP` headers to the IP address of the client that sent the
+request. This is useful to forward the request to Adguard Home and be able to see which client made the request.
+
+It also replies to requests to hosts found in specified `/etc/hosts`-like files, handling `A`, `AAAA` and (automatically
+generated) `PTR` queries. CNAME-style entries are resolved through the upstream and cached for the configured TTL.
+
+## Usage
+
+```
+-u, --upstream    Upstream URL to forward queries to (e.g. https://cloudflare-dns.com/dns-query or dns://1.1.1.1:53)
+-b, --bind        Address to bind to (default: 0.0.0.0:53)
+-t, --ttl         TTL for hosts file entries (default: 10)
+-H, --hosts       Path to a hosts file (may be repeated)
+-T, --timeout     Timeout for upstream requests in seconds (default: 5)
+-V, --verbose     Verbose output
+-h, --help        Show the help screen
+```
 
 ### Hosts file format
 
@@ -34,6 +50,20 @@ Example:
 @example.com    example.org       # This also resolves to 123.45.67.89
 @google.com     google-alias.com  # This resolves to whatever google.com resolves to
 ```
+
+## Running as a launchd daemon (macOS)
+
+A template is provided in `eu.depau.shitty-dns-proxy.plist`. Edit the `ProgramArguments` (upstream, bind address,
+hosts files) to taste, then install it as a system daemon (port 53 needs root):
+
+```
+go build -o shitty-dns-proxy
+sudo cp shitty-dns-proxy /usr/local/bin/
+sudo cp eu.depau.shitty-dns-proxy.plist /Library/LaunchDaemons/
+sudo launchctl load /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist
+```
+
+Logs go to `/var/log/shitty-dns-proxy.log`. To stop: `sudo launchctl unload /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist`.
 
 ## License
 
