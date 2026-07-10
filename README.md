@@ -60,10 +60,14 @@ hosts files) to taste, then install it as a system daemon (port 53 needs root):
 go build -o shitty-dns-proxy
 sudo cp shitty-dns-proxy /usr/local/bin/
 sudo cp eu.depau.shitty-dns-proxy.plist /Library/LaunchDaemons/
-sudo launchctl load /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist
+sudo chown root:wheel /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist
+sudo launchctl bootstrap system /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist
 ```
 
-Logs go to `/var/log/shitty-dns-proxy.log`. To stop: `sudo launchctl unload /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist`.
+The `chown` matters: launchd refuses plists in `/Library/LaunchDaemons` that aren't owned by `root:wheel`
+(the symptom is `Load failed: 5: Input/output error`).
+
+Logs go to `/var/log/shitty-dns-proxy.log`. To stop: `sudo launchctl bootout system /Library/LaunchDaemons/eu.depau.shitty-dns-proxy.plist`.
 
 ## License
 
