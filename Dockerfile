@@ -1,11 +1,11 @@
 # syntax=docker.io/docker/dockerfile:1
-FROM golang:1.19-alpine AS builder
+FROM golang:1.27-alpine AS builder
 
 COPY . /app
 RUN --mount=type=cache,target=/root/.cache/go-build \
     cd /app && go build -o sdp .
 
-FROM alpine:3.14
+FROM alpine:3.24
 
 COPY --from=builder /app/sdp /usr/local/bin/sdp
 
