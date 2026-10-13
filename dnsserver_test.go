@@ -174,3 +174,24 @@ func TestLocalQuery(t *testing.T) {
 		t.Error("Incorrect answer IP: ", resp.Answer[0].(*dns.AAAA).AAAA.String())
 	}
 }
+
+func TestWildcard(t *testing.T) {
+	records, _ := parseHostsScanner(bufio.NewScanner(strings.NewReader(`
+1.2.3.4 *.pages.my.domain
+5.6.7.8 exact.pages.my.domain
+`)))
+	proxy := dnsProxy{records: records}
+	cases := map[string]string{
+		"foo.pages.my.domain.":      "1.2.3.4",
+		"a.b.pages.my.domain.":      "1.2.3.4",
+		"exact.pages.my.domain.":    "5.6.7.8",
+		"pages.my.domain.":          "",
+		"foo.otherpages.my.domain.": "",
+	}
+	for name, want := range cases {
+		got := proxy.lookup(name)
+		if want == "" && got != nil || want != "" && (len(got) != 1 || got[0].IP.String() != want) {
+			t.Error("Wrong lookup for", name, got)
+		}
+	}
+}

@@ -129,6 +129,20 @@ func (p *dnsProxy) queryCName(cname string, recordType uint16, onBehalfOf net.Ad
 	return rrs, nil
 }
 
+// lookup returns the exact match for name, else the most specific "*." wildcard covering it.
+func (p *dnsProxy) lookup(name string) []HostInfo {
+	if records, ok := p.records[name]; ok {
+		return records
+	}
+	labels := dns.SplitDomainName(name)
+	for i := 1; i < len(labels); i++ {
+		if records, ok := p.records["*."+strings.Join(labels[i:], ".")+"."]; ok {
+			return records
+		}
+	}
+	return nil
+}
+
 func (p *dnsProxy) addLocalResponses(m *dns.Msg, onBehalfOf net.Addr) bool {
 	foundEntries := false
 	for _, q := range m.Question {
@@ -142,7 +156,7 @@ func (p *dnsProxy) addLocalResponses(m *dns.Msg, onBehalfOf net.Addr) bool {
 				log.Printf("%s query for %s\n", queryType, q.Name)
 			}
 
-			records := p.records[q.Name]
+			records := p.lookup(q.Name)
 			for _, record := range records {
 				var ipStr string
 
@@ -380,7 +394,7 @@ func main() {
 
 	for name, ips := range proxy.records {
 		for _, ip := range ips {
-			if ip.IsCName() {
+			if ip.IsCName() || strings.HasPrefix(name, "*.") {
 				continue
 			}
 

@@ -41,12 +41,15 @@ The hosts file format is the same as the one used by `/etc/hosts`, with some ext
 - Comments are allowed, and they start with a `#` character.
 - All whitespace is ignored.
 - You can define CNAME-like entries by using a domain name as the target of an entry, prefixed by a `@` character.
+- Wildcards: `*.example.com` matches any subdomain (at any depth) of `example.com`, but not `example.com` itself.
+  Exact entries win over wildcards, and more specific wildcards win over less specific ones.
 
 Example:
 
 ```
 # This is a comment
 123.45.67.89    example.com       # This is also a comment
+123.45.67.89    *.example.com     # foo.example.com, a.b.example.com, ...
 @example.com    example.org       # This also resolves to 123.45.67.89
 @google.com     google-alias.com  # This resolves to whatever google.com resolves to
 ```
